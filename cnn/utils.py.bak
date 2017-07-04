@@ -1,0 +1,177 @@
+# -*- coding: utf-8
+
+import scipy as sp
+import numpy as np
+import pickle as pk
+import sys,os
+import re
+
+def read_csv(filepath, delimiter=",", fmt=None):
+  f = open(filepath, 'r')
+  content = []
+  while True:
+    l = f.readline()
+    if len(l) == 0:
+      break
+    l = l.rstrip()
+    l = l.replace("\xef\xbb\xbf","") # remove the BOM header of utf-8
+    if len(l) == 0:
+      continue
+    cs = l.split(delimiter)
+    if fmt:
+      cs = [fmt(c) for c in cs]
+    content.append(cs)
+  f.close()
+  return content
+
+class RecordItem:
+  def __init__(self, fromTuple=None, filename=None, name=None, matter=None, isPositive=False, isTrue=False):
+    if fromTuple:
+      self.fromTuple(fromTuple)
+      return
+    if filename:
+      self.pos = np.array(read_csv(filename + "_Pos.csv", fmt=int))
+      self.neg = np.array(read_csv(filename + "_Neg.csv", fmt=int))
+    else:
+      self.pos = self.neg = None
+    self.name = name
+    self.matter = matter
+    self.isPositive = isPositive
+    self.isTrue = isTrue
+
+  def __getattr__(self, name):
+    if name == "positive":
+      return (self.isPositive and self.isTrue) or ((not self.isPositive) and (not self.isTrue))
+    else:
+      return None
+
+  def toTuple(self):
+    posArr = None if (self.pos is None) else self.pos.tolist()
+    negArr = None if (self.neg is None) else self.neg.tolist()
+    tp = (self.name, self.matter, self.isPositive, self.isTrue, posArr, negArr)
+    return tp
+
+  def fromTuple(self, tp):
+    self.name = tp[0]
+    self.matter = tp[1]
+    self.isPositive = tp[2]
+    self.isTrue = tp[3]
+    self.pos = None if (tp[4] is None) else np.array(tp[4])
+    self.neg = None if (tp[5] is None) else np.array(tp[5])
+
+def readDatas(withLog=False, withProgress=False, taskFilter=None):
+  tasks = []
+  tasks.append( ("../HMTD正常报警.csv", "HMTD", True, True) )
+  tasks.append( ("../HMTD该报未报.csv", "HMTD", False, False) )
+  tasks.append( ("../HMTD误报.csv", "HMTD", True, False) )
+  tasks.append( ("../TNT正确报警.csv", "TNT", True, True) )
+  tasks.append( ("../TNT误报.csv", "TNT", True, False) )
+
+  if not taskFilter is None:
+    filteredTasks = []
+    for task in tasks:
+      if taskFilter(matter=task[1], isPositive=task[2], isTrue=task[3]):
+        filteredTasks.append(task)
+    tasks = filteredTasks
+
+  matterNames = []
+  for task in tasks:
+    if not task[1] in matterNames:
+      matterNames.append(task[1])
+
+  datas = {}
+  for mn in matterNames:
+    datas[mn] = []
+
+  namereg = re.compile(r"([\w\W]+)_(Pos|Neg)\.csv")
+
+  total = 0
+  for task in tasks:
+    dirname = os.path.join( os.path.dirname(__file__), task[0] )
+    filenames = os.listdir(dirname)
+    total += len(filenames)
+
+  if withProgress:
+    import progressbar
+    widgets = ["Reading: ", progressbar.Percentage(), ' ', progressbar.Bar()]
+    pbar = progressbar.ProgressBar(widgets=widgets, maxval=total).start()
+
+  cnt = 0
+  for task in tasks:
+    dirname = os.path.join( os.path.dirname(__file__), task[0] )
+    matter = task[1]
+    isPositive=task[2]
+    isTrue=task[3]
+    filenames = os.listdir(dirname)
+    recordnames = []
+    for fn in filenames:
+      m = namereg.match(fn)
+      if m is None:
+        continue
+      name = m.group(1)
+      if name in recordnames:
+        continue
+      recordnames.append(name)
+    for name in recordnames:
+      fn = os.path.join(dirname,name)
+      record = RecordItem(filename=fn, name=name, matter=matter, isPositive=isPositive, isTrue=isTrue)
+      datas[matter].append(record)
+      # progress printing
+      cnt += 2
+      pg = int(float(cnt)*100/float(total))
+      if withProgress:
+        pbar.update(cnt)
+      elif withLog:
+        print ">> Read: %s (%d%%)" % fn
+
+  # progress printing
+  if withProgress:
+    pbar.finish()
+
+  return datas
+
+def readToBin(filename="data.pickle"):
+  data = readDatas(withProgress=True)
+  total = 0
+  for k in data:
+    total += len(data[k])
+  import progressbar
+  widgets = ["Serializing: ", progressbar.Percentage(), ' ', progressbar.Bar()]
+  pbar = progressbar.ProgressBar(widgets=widgets, maxval=total).start()
+  cnt = 0
+  for k in data:
+    for i in range(len(data[k])):
+      data[k][i] = data[k][i].toTuple()
+      cnt += 1
+      pbar.update(cnt)
+  pbar.finish()
+  f = open("data.pickle", 'wb')
+  pk.dump(data,f)
+  f.close()
+
+def readFromBin(filename="data.pickle"):
+  f = open("data.pickle", 'rb')
+  data = pk.load(f)
+  f.close()
+  for k in data:
+    for i in range(len(data[k])):
+      data[k][i] = RecordItem(fromTuple=data[k][i])
+  return data
+
+def singleMatterFilter(matterName):
+  def theFilter(matter,isPositive,isTrue):
+    return matter == matterName
+  return theFilter
+
+if __name__ == "__main__":
+  import time
+  t1 = time.time()
+  if len(sys.argv) > 1:
+    if sys.argv[1] == "readcsv":
+      readToBin()
+    if sys.argv[1] == "readcsvonly":
+      readDatas(taskFilter=singleMatterFilter("TNT"))
+    if sys.argv[1] == "readbin":
+      readFromBin()
+  t2 = time.time()
+  print "Elapsed: %d s" % int(t2-t1)
